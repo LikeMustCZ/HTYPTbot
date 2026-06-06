@@ -296,6 +296,14 @@ async def reset_count(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 
+def build_stats_with_refresh():
+    """Stats text + delete buttons + refresh button."""
+    text, kb = build_stats_text_and_buttons()
+    buttons = list(kb.inline_keyboard) if kb else []
+    buttons.append([InlineKeyboardButton('🔄 Обновить', callback_data='refresh_stats')])
+    return text, InlineKeyboardMarkup(buttons)
+
+
 def build_stats_text_and_buttons():
     """Build stats message text and inline keyboard."""
     by_company = {}
@@ -365,7 +373,7 @@ async def stats_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not groups:
         await update.message.reply_text("Пока нет данных.")
         return
-    text, keyboard = build_stats_text_and_buttons()
+    text, keyboard = build_stats_with_refresh()
     await update.message.reply_text(
         text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard
     )
@@ -399,6 +407,19 @@ async def handle_delete_trip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         name = g['name'] if g else '?'
         await query.edit_message_text(f"✅ *{name}* удалена из статистики.", parse_mode=ParseMode.MARKDOWN)
 
+    elif data == 'refresh_stats':
+        # Verify all groups and refresh stats
+        for chat_id in list(groups.keys()):
+            changed = await verify_group(chat_id, ctx)
+            if changed:
+                await update_pin(chat_id, ctx)
+                save_data()
+        if not groups:
+            await query.edit_message_text("Пока нет данных.")
+            return
+        text, keyboard = build_stats_with_refresh()
+        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+
     elif data == 'cancel_del':
         await query.edit_message_text("❌ Отменено.")
 
@@ -416,7 +437,7 @@ async def daily_report(ctx: ContextTypes.DEFAULT_TYPE):
             await update_pin(chat_id, ctx)
             save_data()
 
-    text, keyboard = build_stats_text_and_buttons()
+    text, keyboard = build_stats_with_refresh()
     # Replace header for daily report
     text = text.replace("📊 *Статистика:*", "📊 *Ежедневная сводка:*")
     try:
@@ -449,7 +470,7 @@ def main():
     app.add_handler(MessageHandler(
         filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, handle_private
     ))
-    app.add_handler(CallbackQueryHandler(handle_delete_trip, pattern=r'^(del_trip_|confirm_del_|cancel_del)'))
+    app.add_handler(CallbackQueryHandler(handle_delete_trip, pattern=r'^(del_trip_|confirm_del_|cancel_del|refresh_stats)'))
     app.add_handler(CommandHandler('stats', stats_command))
     app.add_handler(CommandHandler('set', set_count))
     app.add_handler(CommandHandler('company', set_company))
