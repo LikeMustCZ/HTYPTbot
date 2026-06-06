@@ -57,19 +57,46 @@ COMPANY_MAP = {
     'yourperfecttravel': 'Your Perfect Travel',
 }
 
-async def detect_company(chat_id, ctx):
-    """Check group admins and auto-detect company by username."""
+
+def company_from_username(username):
+    if not username:
+        return ''
+    return COMPANY_MAP.get(username.lower().lstrip('@'), '')
+
+
+def detect_from_message(msg):
+    """Detect company from who posted/forwarded the message."""
+    # Posted on behalf of a channel/chat (anonymous admin)
+    if msg.sender_chat:
+        c = company_from_username(getattr(msg.sender_chat, 'username', ''))
+        if c:
+            return c
+    # Forwarded from a channel
+    fwd_chat = getattr(msg, 'forward_from_chat', None)
+    if fwd_chat:
+        c = company_from_username(getattr(fwd_chat, 'username', ''))
+        if c:
+            return c
+    # Regular sender
+    if msg.from_user:
+        c = company_from_username(msg.from_user.username)
+        if c:
+            return c
+    return ''
+
+
+async def detect_from_admins(chat_id, ctx):
+    """Fallback: check group admins for a known company username."""
     try:
         admins = await ctx.bot.get_chat_administrators(chat_id)
         for admin in admins:
-            user = admin.user
-            if user.is_bot:
+            if admin.user.is_bot:
                 continue
-            username = (user.username or '').lower()
-            if username in COMPANY_MAP:
-                return COMPANY_MAP[username]
+            c = company_from_username(admin.user.username)
+            if c:
+                return c
     except Exception as e:
-        logger.error(f"detect_company error: {e}")
+        logger.error(f"detect_from_admins error: {e}")
     return ''
 
 # ─── PARSE SEATS ──────────────────────────────────────
@@ -169,21 +196,32 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if seats == 0:
         return
 
+    # Log sender for debugging detection
+    sender_username = ''
+    if msg.sender_chat:
+        sender_username = f"chat:@{getattr(msg.sender_chat, 'username', '')}"
+    elif msg.from_user:
+        sender_username = f"@{msg.from_user.username}"
+    logger.info(f"[{chat_name}] Сообщение от {sender_username}")
+
     if chat_id not in groups:
-        company = await detect_company(chat_id, ctx)
         groups[chat_id] = {
-            'name': chat_name, 'company': company, 'total': 0,
+            'name': chat_name, 'company': '', 'total': 0,
             'pin_id': None, 'messages': {}
         }
-        if company:
-            logger.info(f"[{chat_name}] Фирма определена: {company}")
 
     g = groups[chat_id]
     g['name'] = chat_name
+
+    # Detect company if not set: from message sender, then from admins
     if not g.get('company'):
-        g['company'] = await detect_company(chat_id, ctx)
-        if g['company']:
-            logger.info(f"[{chat_name}] Фирма определена: {g['company']}")
+        company = detect_from_message(msg)
+        if not company:
+            company = await detect_from_admins(chat_id, ctx)
+        if company:
+            g['company'] = company
+            logger.info(f"[{chat_name}] Фирма определена: {company}")
+
     g['messages'][str(msg.message_id)] = seats
 
     await verify_group(chat_id, ctx)
@@ -315,6 +353,23 @@ async def handle_private(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
 
 
+
+async def stats_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/stats — показать статистику (работает в личке и в группе)."""
+    # Verify all groups first
+    for chat_id in list(groups.keys()):
+        changed = await verify_group(chat_id, ctx)
+        if changed:
+            await update_pin(chat_id, ctx)
+            save_data()
+    if not groups:
+        await update.message.reply_text("Пока нет данных.")
+        return
+    text, keyboard = build_stats_text_and_buttons()
+    await update.message.reply_text(
+        text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard
+    )
+
 # ─── DELETE TRIP ──────────────────────────────────────
 
 async def handle_delete_trip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -395,6 +450,7 @@ def main():
         filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, handle_private
     ))
     app.add_handler(CallbackQueryHandler(handle_delete_trip, pattern=r'^(del_trip_|confirm_del_|cancel_del)'))
+    app.add_handler(CommandHandler('stats', stats_command))
     app.add_handler(CommandHandler('set', set_count))
     app.add_handler(CommandHandler('company', set_company))
     app.add_handler(CommandHandler('reset', reset_count))
