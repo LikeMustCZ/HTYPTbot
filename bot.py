@@ -53,26 +53,21 @@ def load_data():
 # ─── AUTO-DETECT COMPANY ──────────────────────────────
 
 COMPANY_MAP = {
-    'happy': 'Happy Tours',
-    'perfect': 'Your Perfect Travel',
+    'happyvtours': 'Happy Tours',
+    'yourperfecttravel': 'Your Perfect Travel',
 }
 
 async def detect_company(chat_id, ctx):
-    """Check group admins and auto-detect company by account name/username."""
+    """Check group admins and auto-detect company by username."""
     try:
         admins = await ctx.bot.get_chat_administrators(chat_id)
         for admin in admins:
             user = admin.user
             if user.is_bot:
                 continue
-            check = ' '.join([
-                user.username or '',
-                user.first_name or '',
-                user.last_name or ''
-            ]).lower()
-            for keyword, company in COMPANY_MAP.items():
-                if keyword in check:
-                    return company
+            username = (user.username or '').lower()
+            if username in COMPANY_MAP:
+                return COMPANY_MAP[username]
     except Exception as e:
         logger.error(f"detect_company error: {e}")
     return ''
@@ -185,6 +180,10 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     g = groups[chat_id]
     g['name'] = chat_name
+    if not g.get('company'):
+        g['company'] = await detect_company(chat_id, ctx)
+        if g['company']:
+            logger.info(f"[{chat_name}] Фирма определена: {g['company']}")
     g['messages'][str(msg.message_id)] = seats
 
     await verify_group(chat_id, ctx)
