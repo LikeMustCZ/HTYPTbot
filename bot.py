@@ -4,9 +4,9 @@ import json
 import os
 import asyncio
 from datetime import time
-from telegram import Update, ReplyKeyboardMarkup
+from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler,
+    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     filters, ContextTypes
 )
 from telegram.constants import ParseMode
@@ -47,6 +47,34 @@ def load_data():
         groups = {}
 
 
+
+# ─── AUTO-DETECT COMPANY ──────────────────────────────
+
+COMPANY_MAP = {
+    'happy': 'Happy Tours',
+    'perfect': 'Your Perfect Travel',
+}
+
+async def detect_company(chat_id, ctx):
+    """Check group admins and auto-detect company by account name/username."""
+    try:
+        admins = await ctx.bot.get_chat_administrators(chat_id)
+        for admin in admins:
+            user = admin.user
+            if user.is_bot:
+                continue
+            check = ' '.join([
+                user.username or '',
+                user.first_name or '',
+                user.last_name or ''
+            ]).lower()
+            for keyword, company in COMPANY_MAP.items():
+                if keyword in check:
+                    return company
+    except Exception as e:
+        logger.error(f"detect_company error: {e}")
+    return ''
+
 # ─── PARSE SEATS ──────────────────────────────────────
 
 SKIP_WORDS = ['хотят', 'хочет', 'хочу', 'хотим', 'интересует', 'планирую', 'планируем']
@@ -71,7 +99,6 @@ def parse_seats(text):
 # ─── VERIFY DELETED MESSAGES ─────────────────────────
 
 async def verify_group(chat_id, ctx):
-    """Check tracked messages, remove deleted ones. Returns True if changed."""
     g = groups.get(chat_id)
     if not g or not g['messages']:
         return False
@@ -145,18 +172,19 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if seats == 0:
         return
 
-    # Initialize group
     if chat_id not in groups:
+        company = await detect_company(chat_id, ctx)
         groups[chat_id] = {
-            'name': chat_name, 'total': 0,
+            'name': chat_name, 'company': company, 'total': 0,
             'pin_id': None, 'messages': {}
         }
+        if company:
+            logger.info(f"[{chat_name}] Фирма определена: {company}")
 
     g = groups[chat_id]
     g['name'] = chat_name
     g['messages'][str(msg.message_id)] = seats
 
-    # New booking → verify all previous + recalculate
     await verify_group(chat_id, ctx)
     g['total'] = sum(g['messages'].values())
 
@@ -165,7 +193,7 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     logger.info(f"[{chat_name}] +{seats} (итого: {g['total']})")
 
 
-# ─── COMMANDS ─────────────────────────────────────────
+# ─── GROUP COMMANDS ───────────────────────────────────
 
 async def set_count(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -181,7 +209,7 @@ async def set_count(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = msg.chat_id
     if chat_id not in groups:
         groups[chat_id] = {
-            'name': msg.chat.title or 'Группа', 'total': 0,
+            'name': msg.chat.title or 'Группа', 'company': '', 'total': 0,
             'pin_id': None, 'messages': {}
         }
     groups[chat_id]['messages']['initial'] = count
@@ -189,6 +217,29 @@ async def set_count(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update_pin(chat_id, ctx)
     save_data()
     await msg.reply_text(f"✅ Начальный счёт: {count}")
+
+
+async def set_company(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/company Happy Tours — привязать группу к фирме."""
+    msg = update.message
+    if msg.chat.type == 'private':
+        await msg.reply_text("Эту команду нужно писать в группе.")
+        return
+
+    company = ' '.join(ctx.args)
+    if not company:
+        await msg.reply_text("Формат: /company Happy Tours")
+        return
+
+    chat_id = msg.chat_id
+    if chat_id not in groups:
+        groups[chat_id] = {
+            'name': msg.chat.title or 'Группа', 'company': '', 'total': 0,
+            'pin_id': None, 'messages': {}
+        }
+    groups[chat_id]['company'] = company
+    save_data()
+    await msg.reply_text(f"✅ Фирма: {company}")
 
 
 async def reset_count(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -211,8 +262,11 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Привет! Я считаю проданные места в группах поездок.\n\n"
         "Добавь меня в группу — я буду считать автоматически.\n\n"
-        "Если бот добавлен позже — напиши в группе: /set 15\n\n"
-        "📊 Нажми кнопку для сводки.",
+        "Команды для группы:\n"
+        "/set 15 — задать начальный счёт\n"
+        "/company Happy Tours — вручную задать фирму\n"
+        "/reset — сбросить счётчик\n\n"
+        "Фирма определяется автоматически по аккаунту админа группы.",
         reply_markup=ReplyKeyboardMarkup(
             [['📊 Статистика']], resize_keyboard=True
         )
@@ -221,7 +275,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def handle_private(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.message.text == '📊 Статистика':
-        # Verify all groups before showing
+        # Verify all groups
         for chat_id in list(groups.keys()):
             changed = await verify_group(chat_id, ctx)
             if changed:
@@ -232,13 +286,64 @@ async def handle_private(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Пока нет данных.")
             return
 
-        lines = ["📊 *Сводка по поездкам:*\n"]
-        total_all = 0
-        for cid, g in sorted(groups.items(), key=lambda x: x[1]['name']):
-            lines.append(f"• {g['name']} — *{g['total']}* мест")
-            total_all += g['total']
-        lines.append(f"\n💺 *Всего продано: {total_all}*")
-        await update.message.reply_text('\n'.join(lines), parse_mode=ParseMode.MARKDOWN)
+        # Group by company
+        by_company = {}
+        for cid, g in groups.items():
+            company = g.get('company', '') or 'Без фирмы'
+            if company not in by_company:
+                by_company[company] = []
+            by_company[company].append((cid, g))
+
+        lines = ["📊 *Статистика:*\n"]
+        buttons = []
+
+        for company in sorted(by_company.keys()):
+            lines.append(f"*{company}:*")
+            for cid, g in sorted(by_company[company], key=lambda x: x[1]['name']):
+                lines.append(f"• {g['name']} — *{g['total']}* мест")
+                buttons.append([InlineKeyboardButton(
+                    f"🗑 {g['name']}", callback_data=f"del_trip_{cid}"
+                )])
+            lines.append("")
+
+        await update.message.reply_text(
+            '\n'.join(lines),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(buttons) if buttons else None
+        )
+
+
+# ─── DELETE TRIP ──────────────────────────────────────
+
+async def handle_delete_trip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data.startswith('del_trip_'):
+        chat_id = int(data.replace('del_trip_', ''))
+        g = groups.get(chat_id)
+        name = g['name'] if g else '?'
+        await query.edit_message_text(
+            f"🗑 Удалить *{name}* из статистики?",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton('✅ Да, удалить', callback_data=f'confirm_del_{chat_id}'),
+                    InlineKeyboardButton('❌ Отмена', callback_data='cancel_del'),
+                ]
+            ])
+        )
+
+    elif data.startswith('confirm_del_'):
+        chat_id = int(data.replace('confirm_del_', ''))
+        g = groups.pop(chat_id, None)
+        save_data()
+        name = g['name'] if g else '?'
+        await query.edit_message_text(f"✅ *{name}* удалена из статистики.", parse_mode=ParseMode.MARKDOWN)
+
+    elif data == 'cancel_del':
+        await query.edit_message_text("❌ Отменено.")
 
 
 # ─── DAILY REPORT ─────────────────────────────────────
@@ -247,19 +352,27 @@ async def daily_report(ctx: ContextTypes.DEFAULT_TYPE):
     if not groups:
         return
 
-    # Verify all groups before report
+    # Verify all groups
     for chat_id in list(groups.keys()):
         changed = await verify_group(chat_id, ctx)
         if changed:
             await update_pin(chat_id, ctx)
             save_data()
 
+    by_company = {}
+    for cid, g in groups.items():
+        company = g.get('company', '') or 'Без фирмы'
+        if company not in by_company:
+            by_company[company] = []
+        by_company[company].append((cid, g))
+
     lines = ["📊 *Ежедневная сводка:*\n"]
-    total_all = 0
-    for cid, g in sorted(groups.items(), key=lambda x: x[1]['name']):
-        lines.append(f"• {g['name']} — *{g['total']}* мест")
-        total_all += g['total']
-    lines.append(f"\n💺 *Всего продано: {total_all}*")
+    for company in sorted(by_company.keys()):
+        lines.append(f"*{company}:*")
+        for cid, g in sorted(by_company[company], key=lambda x: x[1]['name']):
+            lines.append(f"• {g['name']} — *{g['total']}* мест")
+        lines.append("")
+
     try:
         await ctx.bot.send_message(
             chat_id=ADMIN_ID, text='\n'.join(lines),
@@ -279,7 +392,9 @@ def main():
     app.add_handler(MessageHandler(
         filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, handle_private
     ))
+    app.add_handler(CallbackQueryHandler(handle_delete_trip, pattern=r'^(del_trip_|confirm_del_|cancel_del)'))
     app.add_handler(CommandHandler('set', set_count))
+    app.add_handler(CommandHandler('company', set_company))
     app.add_handler(CommandHandler('reset', reset_count))
     app.add_handler(MessageHandler(
         filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND, handle_group_message
