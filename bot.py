@@ -13,6 +13,8 @@ from telegram.constants import ParseMode
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "284189682"))
+REPORT_CHAT_ID = int(os.environ.get("REPORT_CHAT_ID", "-1003880750609"))
+REPORT_THREAD_ID = int(os.environ.get("REPORT_THREAD_ID", "797"))
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -256,6 +258,28 @@ async def reset_count(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await msg.reply_text("✅ Счётчик сброшен.")
 
 
+
+def build_stats_text_and_buttons():
+    """Build stats message text and inline keyboard."""
+    by_company = {}
+    for cid, g in groups.items():
+        company = g.get('company', '') or 'Без фирмы'
+        if company not in by_company:
+            by_company[company] = []
+        by_company[company].append((cid, g))
+
+    lines = ["📊 *Статистика:*\n"]
+    buttons = []
+    for company in sorted(by_company.keys()):
+        lines.append(f"*{company}:*")
+        for cid, g in sorted(by_company[company], key=lambda x: x[1]['name']):
+            lines.append(f"• {g['name']} — *{g['total']}* мест")
+            buttons.append([InlineKeyboardButton(
+                f"🗑 {g['name']}", callback_data=f"del_trip_{cid}"
+            )])
+        lines.append("")
+    return '\n'.join(lines), InlineKeyboardMarkup(buttons) if buttons else None
+
 # ─── PRIVATE CHAT ─────────────────────────────────────
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -286,30 +310,9 @@ async def handle_private(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Пока нет данных.")
             return
 
-        # Group by company
-        by_company = {}
-        for cid, g in groups.items():
-            company = g.get('company', '') or 'Без фирмы'
-            if company not in by_company:
-                by_company[company] = []
-            by_company[company].append((cid, g))
-
-        lines = ["📊 *Статистика:*\n"]
-        buttons = []
-
-        for company in sorted(by_company.keys()):
-            lines.append(f"*{company}:*")
-            for cid, g in sorted(by_company[company], key=lambda x: x[1]['name']):
-                lines.append(f"• {g['name']} — *{g['total']}* мест")
-                buttons.append([InlineKeyboardButton(
-                    f"🗑 {g['name']}", callback_data=f"del_trip_{cid}"
-                )])
-            lines.append("")
-
+        text, keyboard = build_stats_text_and_buttons()
         await update.message.reply_text(
-            '\n'.join(lines),
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=InlineKeyboardMarkup(buttons) if buttons else None
+            text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard
         )
 
 
@@ -359,27 +362,27 @@ async def daily_report(ctx: ContextTypes.DEFAULT_TYPE):
             await update_pin(chat_id, ctx)
             save_data()
 
-    by_company = {}
-    for cid, g in groups.items():
-        company = g.get('company', '') or 'Без фирмы'
-        if company not in by_company:
-            by_company[company] = []
-        by_company[company].append((cid, g))
-
-    lines = ["📊 *Ежедневная сводка:*\n"]
-    for company in sorted(by_company.keys()):
-        lines.append(f"*{company}:*")
-        for cid, g in sorted(by_company[company], key=lambda x: x[1]['name']):
-            lines.append(f"• {g['name']} — *{g['total']}* мест")
-        lines.append("")
-
+    text, keyboard = build_stats_text_and_buttons()
+    # Replace header for daily report
+    text = text.replace("📊 *Статистика:*", "📊 *Ежедневная сводка:*")
     try:
         await ctx.bot.send_message(
-            chat_id=ADMIN_ID, text='\n'.join(lines),
-            parse_mode=ParseMode.MARKDOWN
+            chat_id=REPORT_CHAT_ID,
+            message_thread_id=REPORT_THREAD_ID,
+            text=text,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=keyboard
         )
     except Exception as e:
         logger.error(f"Report error: {e}")
+        # Fallback to admin DM
+        try:
+            await ctx.bot.send_message(
+                chat_id=ADMIN_ID, text=text,
+                parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard
+            )
+        except Exception:
+            pass
 
 
 # ─── MAIN ─────────────────────────────────────────────
