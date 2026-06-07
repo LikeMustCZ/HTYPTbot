@@ -77,6 +77,12 @@ def detect_from_message(msg):
         c = company_from_username(getattr(fwd_chat, 'username', ''))
         if c:
             return c
+    # Forwarded from a user
+    fwd_user = getattr(msg, 'forward_from', None)
+    if fwd_user:
+        c = company_from_username(getattr(fwd_user, 'username', ''))
+        if c:
+            return c
     # Regular sender
     if msg.from_user:
         c = company_from_username(msg.from_user.username)
@@ -133,10 +139,10 @@ async def verify_group(chat_id, ctx):
             continue
         try:
             fwd = await ctx.bot.forward_message(
-                chat_id=ADMIN_ID, from_chat_id=chat_id,
+                chat_id=REPORT_CHAT_ID, from_chat_id=chat_id,
                 message_id=int(msg_id_str), disable_notification=True
             )
-            await ctx.bot.delete_message(chat_id=ADMIN_ID, message_id=fwd.message_id)
+            await ctx.bot.delete_message(chat_id=REPORT_CHAT_ID, message_id=fwd.message_id)
         except Exception:
             to_remove.append(msg_id_str)
         await asyncio.sleep(0.05)
@@ -196,14 +202,6 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if seats == 0:
         return
 
-    # Log sender for debugging detection
-    sender_username = ''
-    if msg.sender_chat:
-        sender_username = f"chat:@{getattr(msg.sender_chat, 'username', '')}"
-    elif msg.from_user:
-        sender_username = f"@{msg.from_user.username}"
-    logger.info(f"[{chat_name}] Сообщение от {sender_username}")
-
     if chat_id not in groups:
         groups[chat_id] = {
             'name': chat_name, 'company': '', 'total': 0,
@@ -213,14 +211,14 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     g = groups[chat_id]
     g['name'] = chat_name
 
-    # Detect company if not set: from message sender, then from admins
+    # Detect company if not set
     if not g.get('company'):
         company = detect_from_message(msg)
         if not company:
             company = await detect_from_admins(chat_id, ctx)
         if company:
             g['company'] = company
-            logger.info(f"[{chat_name}] Фирма определена: {company}")
+            logger.info(f"[{chat_name}] Фирма: {company}")
 
     g['messages'][str(msg.message_id)] = seats
 
