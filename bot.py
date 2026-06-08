@@ -24,7 +24,23 @@ logger = logging.getLogger(__name__)
 
 # ─── STORAGE ──────────────────────────────────────────
 
-DATA_FILE = '/tmp/counter_data.json'
+def _pick_data_dir():
+    """Use persistent volume /data if available, else fall back to /tmp."""
+    preferred = os.environ.get("DATA_DIR", "/data")
+    for path in (preferred, "/tmp"):
+        try:
+            os.makedirs(path, exist_ok=True)
+            test = os.path.join(path, ".write_test")
+            with open(test, "w") as f:
+                f.write("ok")
+            os.remove(test)
+            return path
+        except Exception:
+            continue
+    return "/tmp"
+
+DATA_DIR = _pick_data_dir()
+DATA_FILE = os.path.join(DATA_DIR, "counter_data.json")
 groups = {}
 
 
@@ -479,6 +495,7 @@ def main():
 
     app.job_queue.run_daily(daily_report, time=time(hour=20, minute=0))
 
+    logger.info(f"Data stored in: {DATA_FILE}")
     logger.info("Counter bot started")
     app.run_polling(drop_pending_updates=True)
 
