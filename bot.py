@@ -144,32 +144,10 @@ def parse_seats(text):
 
 # ─── VERIFY DELETED MESSAGES ─────────────────────────
 
+# ─── (verification removed — counts via +N / -N only) ───
+
 async def verify_group(chat_id, ctx):
-    g = groups.get(chat_id)
-    if not g or not g['messages']:
-        return False
-
-    to_remove = []
-    for msg_id_str in list(g['messages'].keys()):
-        if msg_id_str == 'initial':
-            continue
-        try:
-            fwd = await ctx.bot.forward_message(
-                chat_id=REPORT_CHAT_ID, from_chat_id=chat_id,
-                message_id=int(msg_id_str), disable_notification=True
-            )
-            await ctx.bot.delete_message(chat_id=REPORT_CHAT_ID, message_id=fwd.message_id)
-        except Exception:
-            to_remove.append(msg_id_str)
-        await asyncio.sleep(0.05)
-
-    for msg_id_str in to_remove:
-        seats = g['messages'].pop(msg_id_str, 0)
-        logger.info(f"[{g['name']}] Удалено: {msg_id_str} ({seats} мест)")
-
-    if to_remove:
-        g['total'] = sum(g['messages'].values())
-        return True
+    """No-op kept for compatibility. Counts change only via +N/-N messages."""
     return False
 
 
@@ -237,13 +215,12 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             logger.info(f"[{chat_name}] Фирма: {company}")
 
     g['messages'][str(msg.message_id)] = seats
-
-    await verify_group(chat_id, ctx)
     g['total'] = sum(g['messages'].values())
 
     await update_pin(chat_id, ctx)
     save_data()
-    logger.info(f"[{chat_name}] +{seats} (итого: {g['total']})")
+    sign = '+' if seats >= 0 else ''
+    logger.info(f"[{chat_name}] {sign}{seats} (итого: {g['total']})")
 
 
 # ─── GROUP COMMANDS ───────────────────────────────────
@@ -349,7 +326,10 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/set 15 — задать начальный счёт\n"
         "/company Happy Tours — вручную задать фирму\n"
         "/reset — сбросить счётчик\n\n"
-        "Фирма определяется автоматически по аккаунту админа группы.",
+        "Если бронь отменили — напиши в группе «-2 места» "
+        "(со знаком минус), и счётчик уменьшится.\n\n"
+        "Фирма определяется автоматически по аккаунту, "
+        "который пишет в группе.",
         reply_markup=ReplyKeyboardMarkup(
             [['📊 Статистика']], resize_keyboard=True
         )
