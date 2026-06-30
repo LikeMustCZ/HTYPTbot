@@ -16,6 +16,12 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", "284189682"))
 REPORT_CHAT_ID = int(os.environ.get("REPORT_CHAT_ID", "-1003880750609"))
 REPORT_THREAD_ID = int(os.environ.get("REPORT_THREAD_ID", "797"))
 
+# Интеграция с SMM-агентом (Happy v Tours): если заданы обе переменные,
+# бот будет отправлять свежую статистику агенту. Если не заданы —
+# поведение бота не меняется вообще.
+SMM_PUSH_URL = os.environ.get("SMM_PUSH_URL", "")
+SMM_PUSH_TOKEN = os.environ.get("SMM_PUSH_TOKEN", "")
+
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -219,6 +225,7 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await update_pin(chat_id, ctx)
     save_data()
+    asyncio.create_task(push_stats())
     sign = '+' if seats >= 0 else ''
     logger.info(f"[{chat_name}] {sign}{seats} (итого: {g['total']})")
 
@@ -246,6 +253,7 @@ async def set_count(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     groups[chat_id]['total'] = sum(groups[chat_id]['messages'].values())
     await update_pin(chat_id, ctx)
     save_data()
+    asyncio.create_task(push_stats())
     await msg.reply_text(f"✅ Начальный счёт: {count}")
 
 
@@ -283,6 +291,7 @@ async def reset_count(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         groups[chat_id]['total'] = 0
         await update_pin(chat_id, ctx)
         save_data()
+        asyncio.create_task(push_stats())
     await msg.reply_text("✅ Счётчик сброшен.")
 
 
@@ -315,6 +324,40 @@ def build_stats_text_and_buttons():
             )])
         lines.append("")
     return '\n'.join(lines), InlineKeyboardMarkup(buttons) if buttons else None
+
+
+# ─── PUSH STATS TO SMM AGENT ──────────────────────────
+
+def _stats_plaintext():
+    """Текст статистики без markdown-звёздочек — для отправки агенту."""
+    text, _ = build_stats_text_and_buttons()
+    return text.replace('*', '')
+
+
+def _push_stats_sync():
+    if not SMM_PUSH_URL or not SMM_PUSH_TOKEN:
+        return
+    try:
+        import urllib.request
+        data = json.dumps({"text": _stats_plaintext()}).encode("utf-8")
+        req = urllib.request.Request(
+            SMM_PUSH_URL, data=data, method="POST",
+            headers={"Content-Type": "application/json", "X-Token": SMM_PUSH_TOKEN},
+        )
+        urllib.request.urlopen(req, timeout=8).read()
+    except Exception as e:
+        logger.error(f"push_stats error: {e}")
+
+
+async def push_stats():
+    """Безопасно (в фоне) отправить статистику SMM-агенту. Ошибки не влияют на бота."""
+    if not SMM_PUSH_URL or not SMM_PUSH_TOKEN:
+        return
+    try:
+        await asyncio.to_thread(_push_stats_sync)
+    except Exception as e:
+        logger.error(f"push_stats schedule error: {e}")
+
 
 # ─── PRIVATE CHAT ─────────────────────────────────────
 
@@ -398,6 +441,7 @@ async def handle_delete_trip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         chat_id = int(data.replace('confirm_del_', ''))
         g = groups.pop(chat_id, None)
         save_data()
+        asyncio.create_task(push_stats())
         name = g['name'] if g else '?'
         await query.edit_message_text(f"✅ *{name}* удалена из статистики.", parse_mode=ParseMode.MARKDOWN)
 
@@ -430,6 +474,8 @@ async def daily_report(ctx: ContextTypes.DEFAULT_TYPE):
         if changed:
             await update_pin(chat_id, ctx)
             save_data()
+
+    await push_stats()
 
     text, keyboard = build_stats_with_refresh()
     # Replace header for daily report
